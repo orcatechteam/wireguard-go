@@ -208,6 +208,9 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
+func (device *Device) AllowedIPs() *AllowedIPs {
+	return &device.allowedips
+}
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")

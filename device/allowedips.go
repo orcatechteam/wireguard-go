@@ -9,6 +9,7 @@ import (
 	"container/list"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/bits"
 	"net"
 	"net/netip"
@@ -191,15 +192,24 @@ func (trie parentIndirection) insert(ip []byte, cidr uint8, peer *Peer) {
 func (node *trieEntry) lookup(ip []byte) *Peer {
 	var found *Peer
 	size := uint8(len(ip))
+	fmt.Printf("IP: %X, Bits: %X, CDIR: %d\n", ip, node.bits, node.cidr)
 	for node != nil && commonBits(node.bits, ip) >= node.cidr {
 		if node.peer != nil {
+			fmt.Printf("Found: %s\n", node.peer)
 			found = node.peer
 		}
+
+		fmt.Printf("Bit At Byte: %d == %d\n", node.bitAtByte, size)
 		if node.bitAtByte == size {
 			break
 		}
 		bit := node.choose(ip)
 		node = node.child[bit]
+		if node != nil {
+			fmt.Printf("IP: %X, Bits: %X, CDIR: %d\n", ip, node.bits, node.cidr)
+		} else {
+			fmt.Printf("Node is nil")
+		}
 	}
 	return found
 }

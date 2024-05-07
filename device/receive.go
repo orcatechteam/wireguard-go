@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -259,6 +260,7 @@ func (device *Device) RoutineDecryption(id int) {
 				content,
 				nil,
 			)
+			fmt.Printf("Decrypted: %s, %X", elem.endpoint.DstToString(), elem.packet)
 			if err != nil {
 				elem.packet = nil
 			}
@@ -484,6 +486,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 				elem.packet = elem.packet[:length]
 				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
+
+				fmt.Printf("Checking allowed IP: %X\n", src)
 				if device.allowedips.Lookup(src) != peer {
 					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 					continue
@@ -511,6 +515,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				continue
 			}
 
+			fmt.Printf("ENDPOINT: %s -> %s\n", elem.endpoint.SrcToString(), elem.endpoint.DstToString())
 			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
 		}
 
