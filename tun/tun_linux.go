@@ -356,7 +356,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 		}
 	}
 	for _, bufsI := range tun.toWrite {
-		fmt.Printf("TUN: write: %X\n", bufs[bufsI][offset:])
+		Printf("TUN: write: %X\n", bufs[bufsI][offset:])
 		n, err := tun.tunFile.Write(bufs[bufsI][offset:])
 		if errors.Is(err, syscall.EBADFD) {
 			return total, os.ErrClosed
@@ -461,7 +461,7 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			readInto = tun.readBuff[:]
 		}
 		n, err := tun.tunFile.Read(readInto)
-		fmt.Printf("TUN: Read: %X\n", readInto[:n])
+		Printf("TUN: Read: %X\n", readInto[:n])
 		if errors.Is(err, syscall.EBADFD) {
 			err = os.ErrClosed
 		}

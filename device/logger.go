@@ -46,3 +46,7 @@ func NewLogger(level int, prepend string) *Logger {
 	}
 	return logger
 }
+
+var Printf = NoPrintf
+
+func NoPrintf(format string, a ...any) (n int, err error) { return n, err }

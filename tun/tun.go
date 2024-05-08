@@ -17,6 +17,10 @@ const (
 	EventMTUUpdate
 )
 
+var Printf = NoPrintf
+
+func NoPrintf(format string, a ...any) (n int, err error) { return n, err }
+
 type Device interface {
 	// File returns the file descriptor of the device.
 	File() *os.File

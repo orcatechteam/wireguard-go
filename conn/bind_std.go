@@ -258,9 +258,6 @@ func (s *StdNetBind) receiveIP(
 	} else {
 		msg := &(*msgs)[0]
 		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
-		if msg.N > 0 && msg.NN > 0 {
-			fmt.Printf("Bind: recv: %X, %X\n", msg.Buffers[0][:msg.N], msg.OOB[:msg.NN])
-		}
 		if err != nil {
 			return 0, err
 		}
@@ -382,10 +379,6 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 		retried bool
 		err     error
 	)
-
-	for _, buf := range bufs {
-		fmt.Printf("Bind: send: %X\n", buf)
-	}
 
 retry:
 	if offload {

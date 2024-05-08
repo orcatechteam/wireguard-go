@@ -39,6 +39,10 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+var Printf = NoPrintf
+
+func NoPrintf(format string, a ...any) (n int, err error) { return n, err }
+
 type Net struct {
 	ep             *channel.Endpoint
 	Stack          *stack.Stack
@@ -127,7 +131,7 @@ func (tun *Net) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	fmt.Printf("TUN: read: %X\n", buf[0][offset:offset+n])
+	Printf("TUN: read: %X\n", buf[0][offset:offset+n])
 	sizes[0] = n
 	return 1, nil
 }
@@ -139,7 +143,7 @@ func (tun *Net) Write(buffers [][]byte, offset int) (int, error) {
 			continue
 		}
 
-		fmt.Printf("TUN: write: %X\n", buf)
+		Printf("TUN: write: %X\n", buf)
 		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
 		switch packet[0] >> 4 {
 		case 4:
