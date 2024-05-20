@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,7 +47,10 @@ func NoPrintf(format string, a ...any) (n int, err error) { return n, err }
 type Net struct {
 	ep             *channel.Endpoint
 	Stack          *stack.Stack
+	notifyHandle   *channel.NotificationHandle
 	events         chan tun.Event
+	pktMu          sync.RWMutex
+	pktClosed      bool
 	incomingPacket chan *buffer.View
 	mtu            int
 	dnsServers     []netip.Addr
@@ -72,7 +76,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
-	dev.ep.AddNotify(dev)
+	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.Stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
@@ -166,21 +170,28 @@ func (tun *Net) WriteNotify() {
 	view := pkt.ToView()
 	pkt.DecRef()
 
-	tun.incomingPacket <- view
+	tun.pktMu.RLock()
+	if !tun.pktClosed {
+		tun.incomingPacket <- view
+	}
+	tun.pktMu.RUnlock()
 }
 
 func (tun *Net) Close() error {
 	tun.Stack.RemoveNIC(1)
+	tun.Stack.Close()
 
+	tun.ep.RemoveNotify(tun.notifyHandle)
 	if tun.events != nil {
 		close(tun.events)
 	}
 
 	tun.ep.Close()
 
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
-	}
+	tun.pktMu.Lock()
+	tun.pktClosed = true
+	close(tun.incomingPacket)
+	tun.pktMu.Unlock()
 
 	return nil
 }
