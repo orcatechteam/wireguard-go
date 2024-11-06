@@ -251,6 +251,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	)
 
 	if msg.Type != MessageInitiationType {
+		device.log.Errorf("ConsumeMessageInitiation: invalid message type %d", msg.Type)
 		return nil
 	}
 
@@ -266,12 +267,14 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	var key [chacha20poly1305.KeySize]byte
 	ss, err := device.staticIdentity.privateKey.sharedSecret(msg.Ephemeral)
 	if err != nil {
+		device.log.Errorf("ConsumeMessageInitiation: shared secret failed: %s", err)
 		return nil
 	}
 	KDF2(&chainKey, &key, chainKey[:], ss[:])
 	aead, _ := chacha20poly1305.New(key[:])
 	_, err = aead.Open(peerPK[:0], ZeroNonce[:], msg.Static[:], hash[:])
 	if err != nil {
+		device.log.Errorf("ConsumeMessageInitiation: failed to open aead: %s", err)
 		return nil
 	}
 	mixHash(&hash, &hash, msg.Static[:])
@@ -279,8 +282,15 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	// lookup peer
 
 	peer := device.LookupPeer(peerPK)
-	if peer == nil || !peer.isRunning.Load() {
+	if peer == nil {
+		device.log.Errorf("ConsumeMessageInitiation: failed to lookup peer")
 		return nil
+	}
+	if !peer.isRunning.Load() {
+		peer.Start()
+		if peer.persistentKeepaliveInterval.Load() > 0 {
+			peer.SendKeepalive()
+		}
 	}
 
 	handshake := &peer.handshake
@@ -293,6 +303,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 
 	if isZero(handshake.precomputedStaticStatic[:]) {
 		handshake.mutex.RUnlock()
+		device.log.Errorf("%v - ConsumeMessageInitiation: failed precomputed static", peer)
 		return nil
 	}
 	KDF2(
@@ -305,6 +316,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
 	if err != nil {
 		handshake.mutex.RUnlock()
+		device.log.Verbosef("%v - ConsumeMessageInitiation: aead open failed", peer, err)
 		return nil
 	}
 	mixHash(&hash, &hash, msg.Timestamp[:])

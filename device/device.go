@@ -42,7 +42,8 @@ type Device struct {
 		sync.RWMutex
 		bind          conn.Bind // bind interface
 		netlinkCancel *rwcancel.RWCancel
-		port          uint16 // listening port
+		portActual    uint16 // actual listening port
+		portRequested uint16 // requested listening port
 		fwmark        uint32 // mark value (0 = disabled)
 		brokenRoaming bool
 	}
@@ -140,6 +141,7 @@ func (device *Device) changeState(want deviceState) (err error) {
 	device.state.Lock()
 	defer device.state.Unlock()
 	old := device.deviceState()
+	device.log.Verbosef("Interface change state from %d to %d", old, want)
 	if old == deviceStateClosed {
 		// once closed, always closed
 		device.log.Verbosef("Interface closed, ignored requested state %s", want)
@@ -147,6 +149,7 @@ func (device *Device) changeState(want deviceState) (err error) {
 	}
 	switch want {
 	case old:
+		device.log.Verbosef("Interface already in requested state, ignored requested state %s", want)
 		return nil
 	case deviceStateUp:
 		device.state.state.Store(uint32(deviceStateUp))
@@ -161,6 +164,8 @@ func (device *Device) changeState(want deviceState) (err error) {
 		if err == nil {
 			err = errDown
 		}
+	default:
+		device.log.Errorf("unknown device state: %d", want)
 	}
 	device.log.Verbosef("Interface state was %s, requested %s, now %s", old, want, device.deviceState())
 	return
@@ -169,6 +174,7 @@ func (device *Device) changeState(want deviceState) (err error) {
 // upLocked attempts to bring the device up and reports whether it succeeded.
 // The caller must hold device.state.mu and is responsible for updating device.state.state.
 func (device *Device) upLocked() error {
+	device.log.Verbosef("Device coming up")
 	if err := device.BindUpdate(); err != nil {
 		device.log.Errorf("Unable to update bind: %v", err)
 		return err
@@ -181,18 +187,25 @@ func (device *Device) upLocked() error {
 
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
+		if peer.endpoint.val == nil {
+			continue
+		}
+		device.log.Verbosef("%s: Starting after bringing device up", peer.endpoint.val)
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
 	device.peers.RUnlock()
+	device.log.Verbosef("Device up")
 	return nil
 }
 
 // downLocked attempts to bring the device down.
 // The caller must hold device.state.mu and is responsible for updating device.state.state.
 func (device *Device) downLocked() error {
+
+	device.log.Verbosef("Device going down")
 	err := device.BindClose()
 	if err != nil {
 		device.log.Errorf("Bind close failed: %v", err)
@@ -203,6 +216,7 @@ func (device *Device) downLocked() error {
 		peer.Stop()
 	}
 	device.peers.RUnlock()
+	device.log.Verbosef("Device down")
 	return err
 }
 
@@ -342,7 +356,11 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	device.peers.RLock()
 	defer device.peers.RUnlock()
 
-	return device.peers.keyMap[pk]
+	p, ok := device.peers.keyMap[pk]
+	if !ok {
+		device.log.Verbosef("Peer with public key %02x not found", pk)
+	}
+	return p
 }
 
 func (device *Device) RemovePeer(key NoisePublicKey) {
@@ -378,8 +396,8 @@ func (device *Device) Close() {
 	device.state.state.Store(uint32(deviceStateClosed))
 	device.log.Verbosef("Device closing")
 
-	device.tun.device.Close()
-	device.downLocked()
+	_ = device.tun.device.Close()
+	_ = device.downLocked()
 
 	// Remove peers before closing queues,
 	// because peers assume that queues are active.
@@ -426,7 +444,7 @@ func closeBindLocked(device *Device) error {
 	var err error
 	netc := &device.net
 	if netc.netlinkCancel != nil {
-		netc.netlinkCancel.Cancel()
+		_ = netc.netlinkCancel.Cancel()
 	}
 	if netc.bind != nil {
 		err = netc.bind.Close()
@@ -472,6 +490,8 @@ func (device *Device) BindUpdate() error {
 	device.net.Lock()
 	defer device.net.Unlock()
 
+	device.log.Verbosef("updating bind")
+
 	// close existing sockets
 	if err := closeBindLocked(device); err != nil {
 		return err
@@ -479,6 +499,7 @@ func (device *Device) BindUpdate() error {
 
 	// open new sockets
 	if !device.isUp() {
+		device.log.Verbosef("Device is down")
 		return nil
 	}
 
@@ -487,16 +508,16 @@ func (device *Device) BindUpdate() error {
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
 
-	recvFns, netc.port, err = netc.bind.Open(netc.port)
+	recvFns, netc.portActual, err = netc.bind.Open(netc.portRequested)
 	if err != nil {
-		netc.port = 0
+		netc.portActual = 0
 		return err
 	}
 
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
-		netc.bind.Close()
-		netc.port = 0
+		_ = netc.bind.Close()
+		netc.portActual = 0
 		return err
 	}
 

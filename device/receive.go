@@ -204,7 +204,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				}
 
 			default:
-				device.log.Verbosef("Received message with unknown type")
+				device.log.Verbosef("%s - Received message with unknown type: %d - %X", endpoints[i], msgType, packet)
 				continue
 			}
 
@@ -365,7 +365,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer := device.ConsumeMessageInitiation(&msg)
 			if peer == nil {
-				device.log.Verbosef("Received invalid initiation message from %s", elem.endpoint.DstToString())
+				device.log.Verbosef("Received invalid initiation message from %s", elem.endpoint)
 				goto skip
 			}
 

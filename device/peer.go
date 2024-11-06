@@ -15,6 +15,8 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 )
 
+var errNoKnownEndpoint = errors.New("no known endpoint for peer")
+
 type Peer struct {
 	isRunning         atomic.Bool
 	keypairs          Keypairs
@@ -125,7 +127,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	endpoint := peer.endpoint.val
 	if endpoint == nil {
 		peer.endpoint.Unlock()
-		return errors.New("no known endpoint for peer")
+		return errNoKnownEndpoint
 	}
 	if peer.endpoint.clearSrcOnTx {
 		endpoint.ClearSrc()

@@ -134,8 +134,8 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersAnyAuthenticatedPacketSent()
 
 	err = peer.SendBuffers([][]byte{packet})
-	if err != nil {
-		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
+	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
+		peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
 	}
 	peer.timersHandshakeInitiated()
 
@@ -173,7 +173,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 	// TODO: allocation could be avoided
 	err = peer.SendBuffers([][]byte{packet})
-	if err != nil {
+	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
 	return err
@@ -212,6 +212,9 @@ func (device *Device) AllowedIPs() *AllowedIPs {
 	return &device.allowedips
 }
 func (device *Device) RoutineReadFromTUN() {
+	wg := sync.WaitGroup{}
+	defer wg.Wait()
+
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
 		device.state.stopping.Done()
@@ -316,7 +319,11 @@ func (device *Device) RoutineReadFromTUN() {
 				if !errors.Is(readErr, os.ErrClosed) {
 					device.log.Errorf("Failed to read packet from TUN device: %v", readErr)
 				}
-				go device.Close()
+				wg.Add(1)
+				go func() {
+					device.Close()
+					wg.Done()
+				}()
 			}
 			return
 		}
@@ -539,7 +546,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 				err = errGSO.RetryErr
 			}
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, errNoKnownEndpoint) {
 			device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
 			continue
 		}

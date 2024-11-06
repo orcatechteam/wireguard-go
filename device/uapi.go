@@ -89,8 +89,10 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			keyf("private_key", (*[32]byte)(&device.staticIdentity.privateKey))
 		}
 
-		if device.net.port != 0 {
-			sendf("listen_port=%d", device.net.port)
+		if device.net.portActual != 0 {
+			sendf("listen_port=%d", device.net.portActual)
+		} else if device.net.portRequested != 0 {
+			sendf("listen_port=%d", device.net.portRequested)
 		}
 
 		if device.net.fwmark != 0 {
@@ -212,13 +214,13 @@ func (device *Device) handleDeviceLine(key, value string) error {
 		}
 
 		// update port and rebind
-		device.log.Verbosef("UAPI: Updating listen port")
+		device.log.Verbosef("UAPI: Updating listen port - %d", port)
 
 		device.net.Lock()
-		device.net.port = uint16(port)
+		device.net.portRequested = uint16(port)
 		device.net.Unlock()
 
-		if err := device.BindUpdate(); err != nil {
+		if err = device.BindUpdate(); err != nil {
 			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to set listen_port: %w", err)
 		}
 
@@ -229,7 +231,7 @@ func (device *Device) handleDeviceLine(key, value string) error {
 		}
 
 		device.log.Verbosef("UAPI: Updating fwmark")
-		if err := device.BindSetMark(uint32(mark)); err != nil {
+		if err = device.BindSetMark(uint32(mark)); err != nil {
 			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to update fwmark: %w", err)
 		}
 
@@ -262,7 +264,8 @@ func (peer *ipcSetPeer) handlePostConfig() {
 	if peer.created {
 		peer.endpoint.disableRoaming = peer.device.net.brokenRoaming && peer.endpoint.val != nil
 	}
-	if peer.device.isUp() {
+	if peer.device.isUp() && peer.endpoint.val != nil {
+		peer.device.log.Verbosef("%s - UAPI: Starting endpoint %s", peer.Peer, peer.endpoint.val)
 		peer.Start()
 		if peer.pkaOn {
 			peer.SendKeepalive()

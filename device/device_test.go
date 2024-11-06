@@ -177,7 +177,7 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 			p.dev.Close()
 			continue
 		}
-		endpointCfg[i^1] = fmt.Sprintf(endpointCfg[i^1], p.dev.net.port)
+		endpointCfg[i^1] = fmt.Sprintf(endpointCfg[i^1], p.dev.net.portActual)
 	}
 	for i := range pair {
 		p := &pair[i]
