@@ -65,11 +65,10 @@ func (peer *Peer) keepKeyFreshReceiving() {
 	}
 }
 
-/* Receives incoming datagrams for the device
- *
- * Every time the bind is updated a new routine is started for
- * IPv4 and IPv6 (separately)
- */
+// RoutineReceiveIncoming Receives incoming datagrams for the device
+//
+// Every time the bind is updated a new routine is started for
+// IPv4 and IPv6 (separately)
 func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
 	recvName := recv.PrettyName()
 	defer func() {
@@ -109,6 +108,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 	for {
 		count, err = recv(bufs, sizes, endpoints)
+		//device.log.Verbosef("Routine: receive incoming %s - received count %d", recvName, count)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
@@ -259,7 +259,7 @@ func (device *Device) RoutineDecryption(id int) {
 				content,
 				nil,
 			)
-			Printf("Decrypted: %s, %X\n", elem.endpoint.DstToString(), elem.packet)
+			_, _ = Printf("Decrypted: %s, %X\n", elem.endpoint.DstToString(), elem.packet)
 			if err != nil {
 				elem.packet = nil
 			}
@@ -268,8 +268,7 @@ func (device *Device) RoutineDecryption(id int) {
 	}
 }
 
-/* Handles incoming packets related to handshake
- */
+// RoutineHandshake handles incoming packets related to handshake
 func (device *Device) RoutineHandshake(id int) {
 	defer func() {
 		device.log.Verbosef("Routine: handshake worker %d - stopped", id)
@@ -279,7 +278,9 @@ func (device *Device) RoutineHandshake(id int) {
 
 	for elem := range device.queue.handshake.c {
 
-		// handle cookie fields and ratelimiting
+		//device.log.Verbosef("Routine: handshake worker %d - received element %d", id, elem.msgType)
+
+		// handle cookie fields and rate limiting
 
 		switch elem.msgType {
 
@@ -442,6 +443,9 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	bufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.inbound.c {
+
+		//device.log.Verbosef("%v - Routine: sequential receiver - received container", peer)
+
 		if elemsContainer == nil {
 			return
 		}
@@ -514,7 +518,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				continue
 			}
 
-			Printf("ENDPOINT: %s -> %s\n", elem.endpoint.SrcToString(), elem.endpoint.DstToString())
+			_, _ = Printf("ENDPOINT: %s -> %s\n", elem.endpoint.SrcToString(), elem.endpoint.DstToString())
 			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
 		}
 

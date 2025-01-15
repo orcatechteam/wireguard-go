@@ -251,6 +251,7 @@ func (device *Device) RoutineReadFromTUN() {
 	for {
 		// read packets
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
+		//device.log.Verbosef("Routine: TUN reader - read %d bytes", count)
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue
@@ -459,6 +460,7 @@ func (device *Device) RoutineEncryption(id int) {
 	device.log.Verbosef("Routine: encryption worker %d - started", id)
 
 	for elemsContainer := range device.queue.encryption.c {
+		//	device.log.Verbosef("Routine: encryption worker %d - received elem container count %d", id, len(elemsContainer.elems))
 		for _, elem := range elemsContainer.elems {
 			// populate header fields
 			header := elem.buffer[:MessageTransportHeaderSize]
