@@ -449,6 +449,7 @@ func closeBindLocked(device *Device) error {
 	if netc.bind != nil {
 		err = netc.bind.Close()
 	}
+	// this requires the tunnel to be closed which isn't when bind it closed
 	netc.stopping.Wait()
 	return err
 }

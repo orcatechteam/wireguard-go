@@ -212,14 +212,14 @@ func (device *Device) AllowedIPs() *AllowedIPs {
 	return &device.allowedips
 }
 func (device *Device) RoutineReadFromTUN() {
-	wg := sync.WaitGroup{}
-	defer wg.Wait()
-
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
 		device.state.stopping.Done()
 		device.queue.encryption.wg.Done()
 	}()
+
+	wg := sync.WaitGroup{}
+	defer wg.Wait()
 
 	device.log.Verbosef("Routine: TUN reader - started")
 

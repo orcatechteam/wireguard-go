@@ -49,6 +49,7 @@ type Net struct {
 	Stack          *stack.Stack
 	notifyHandle   *channel.NotificationHandle
 	events         chan tun.Event
+	closed         chan bool
 	pktMu          sync.RWMutex
 	pktClosed      bool
 	incomingPacket chan *buffer.View
@@ -70,17 +71,21 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		incomingPacket: make(chan *buffer.View),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
+		closed:         make(chan bool),
 	}
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	tcpipErr := dev.Stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+
+	var err tcpip.Error
+	if err = dev.Stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt); err != nil {
+		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
+
 	dev.notifyHandle = dev.ep.AddNotify(dev)
-	tcpipErr = dev.Stack.CreateNIC(1, dev.ep)
-	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
+
+	if err = dev.Stack.CreateNIC(1, dev.ep); err != nil {
+		return nil, nil, fmt.Errorf("CreateNIC: %v", err)
 	}
+
 	for _, ip := range localAddresses {
 		var protoNumber tcpip.NetworkProtocolNumber
 		if ip.Is4() {
@@ -92,9 +97,8 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 			Protocol:          protoNumber,
 			AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 		}
-		tcpipErr := dev.Stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
-		if tcpipErr != nil {
-			return nil, nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
+		if err = dev.Stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{}); err != nil {
+			return nil, nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, err)
 		}
 		if ip.Is4() {
 			dev.hasV4 = true
@@ -110,7 +114,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	}
 
 	dev.events <- tun.EventUp
-	return dev, (*Net)(dev), nil
+	return dev, dev, nil
 }
 
 func (tun *Net) Name() (string, error) {
@@ -178,6 +182,13 @@ func (tun *Net) WriteNotify() {
 }
 
 func (tun *Net) Close() error {
+	select {
+	case <-tun.closed:
+		return nil
+	default:
+		close(tun.closed)
+	}
+
 	tun.Stack.RemoveNIC(1)
 	tun.Stack.Close()
 
@@ -562,10 +573,10 @@ func newRequest(q dnsmessage.Question) (id uint16, udpReq, tcpReq []byte, err er
 	id = randU16()
 	b := dnsmessage.NewBuilder(make([]byte, 2, 514), dnsmessage.Header{ID: id, RecursionDesired: true})
 	b.EnableCompression()
-	if err := b.StartQuestions(); err != nil {
+	if err = b.StartQuestions(); err != nil {
 		return 0, nil, nil, err
 	}
-	if err := b.Question(q); err != nil {
+	if err = b.Question(q); err != nil {
 		return 0, nil, nil, err
 	}
 	tcpReq, err = b.Finish()
@@ -675,7 +686,6 @@ func (tnet *Net) exchange(ctx context.Context, server netip.Addr, q dnsmessage.Q
 		defer cancel()
 
 		var c net.Conn
-		var err error
 		if useUDP {
 			c, err = tnet.DialUDPAddrPort(netip.AddrPort{}, netip.AddrPortFrom(server, 53))
 		} else {
@@ -700,14 +710,14 @@ func (tnet *Net) exchange(ctx context.Context, server netip.Addr, q dnsmessage.Q
 		}
 		c.Close()
 		if err != nil {
-			if err == context.Canceled {
+			if errors.Is(err, context.Canceled) {
 				err = errCanceled
-			} else if err == context.DeadlineExceeded {
+			} else if errors.Is(err, context.DeadlineExceeded) {
 				err = errTimeout
 			}
 			return dnsmessage.Parser{}, dnsmessage.Header{}, err
 		}
-		if err := p.SkipQuestion(); err != dnsmessage.ErrSectionDone {
+		if err = p.SkipQuestion(); !errors.Is(err, dnsmessage.ErrSectionDone) {
 			return dnsmessage.Parser{}, dnsmessage.Header{}, errInvalidDNSResponse
 		}
 		if h.Truncated {
@@ -723,7 +733,7 @@ func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
 		return errNoSuchHost
 	}
 	_, err := p.AnswerHeader()
-	if err != nil && err != dnsmessage.ErrSectionDone {
+	if err != nil && !errors.Is(err, dnsmessage.ErrSectionDone) {
 		return errCannotUnmarshalDNSMessage
 	}
 	if h.RCode == dnsmessage.RCodeSuccess && !h.Authoritative && !h.RecursionAvailable && err == dnsmessage.ErrSectionDone {
@@ -741,7 +751,7 @@ func checkHeader(p *dnsmessage.Parser, h dnsmessage.Header) error {
 func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) error {
 	for {
 		h, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
+		if errors.Is(err, dnsmessage.ErrSectionDone) {
 			return errNoSuchHost
 		}
 		if err != nil {
@@ -750,7 +760,7 @@ func skipToAnswer(p *dnsmessage.Parser, qtype dnsmessage.Type) error {
 		if h.Type == qtype {
 			return nil
 		}
-		if err := p.SkipAnswer(); err != nil {
+		if err = p.SkipAnswer(); err != nil {
 			return errCannotUnmarshalDNSMessage
 		}
 	}
@@ -788,16 +798,16 @@ func (tnet *Net) tryOneName(ctx context.Context, name string, qtype dnsmessage.T
 				continue
 			}
 
-			if err := checkHeader(&p, h); err != nil {
+			if err = checkHeader(&p, h); err != nil {
 				dnsErr := &net.DNSError{
 					Err:    err.Error(),
 					Name:   name,
 					Server: server.String(),
 				}
-				if err == errServerTemporarilyMisbehaving {
+				if errors.Is(err, errServerTemporarilyMisbehaving) {
 					dnsErr.IsTemporary = true
 				}
-				if err == errNoSuchHost {
+				if errors.Is(err, errNoSuchHost) {
 					dnsErr.IsNotFound = true
 					return p, server.String(), dnsErr
 				}
@@ -805,8 +815,7 @@ func (tnet *Net) tryOneName(ctx context.Context, name string, qtype dnsmessage.T
 				continue
 			}
 
-			err = skipToAnswer(&p, qtype)
-			if err == nil {
+			if err = skipToAnswer(&p, qtype); err == nil {
 				return p, server.String(), nil
 			}
 			lastErr = &net.DNSError{
@@ -814,7 +823,7 @@ func (tnet *Net) tryOneName(ctx context.Context, name string, qtype dnsmessage.T
 				Name:   name,
 				Server: server.String(),
 			}
-			if err == errNoSuchHost {
+			if errors.Is(err, errNoSuchHost) {
 				lastErr.(*net.DNSError).IsNotFound = true
 				return p, server.String(), lastErr
 			}
@@ -879,7 +888,7 @@ func (tnet *Net) LookupContextHost(ctx context.Context, host string) ([]string, 
 	loop:
 		for {
 			h, err := result.p.AnswerHeader()
-			if err != nil && err != dnsmessage.ErrSectionDone {
+			if err != nil && !errors.Is(err, dnsmessage.ErrSectionDone) {
 				lastErr = &net.DNSError{
 					Err:    errCannotMarshalDNSMessage.Error(),
 					Name:   host,
@@ -915,7 +924,7 @@ func (tnet *Net) LookupContextHost(ctx context.Context, host string) ([]string, 
 				addrsV6 = append(addrsV6, netip.AddrFrom16(aaaa.AAAA))
 
 			default:
-				if err := result.p.SkipAnswer(); err != nil {
+				if err = result.p.SkipAnswer(); err != nil {
 					lastErr = &net.DNSError{
 						Err:    errCannotMarshalDNSMessage.Error(),
 						Name:   host,
