@@ -8,6 +8,7 @@ package device
 import (
 	"container/list"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -115,11 +116,10 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	return peer, nil
 }
 
-func (peer *Peer) SendBuffers(buffers [][]byte) error {
+func (peer *Peer) SendBuffers(buffers [][]byte) (err error) {
 	peer.device.net.RLock()
-	defer peer.device.net.RUnlock()
-
 	if peer.device.isClosed() {
+		peer.device.net.RUnlock()
 		return nil
 	}
 
@@ -127,6 +127,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	endpoint := peer.endpoint.val
 	if endpoint == nil {
 		peer.endpoint.Unlock()
+		peer.device.net.RUnlock()
 		return errNoKnownEndpoint
 	}
 	if peer.endpoint.clearSrcOnTx {
@@ -135,15 +136,23 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	}
 	peer.endpoint.Unlock()
 
-	err := peer.device.net.bind.Send(buffers, endpoint)
-	if err == nil {
+	switch err = peer.device.net.bind.Send(buffers, endpoint); {
+	case err == nil:
 		var totalLen uint64
 		for _, b := range buffers {
 			totalLen += uint64(len(b))
 		}
 		peer.txBytes.Add(totalLen)
+		peer.device.net.RUnlock()
+		return nil
+	case errors.Is(err, net.ErrClosed):
+		peer.device.net.RUnlock()
+		peer.Stop()
+		return err
+	default:
+		peer.device.net.RUnlock()
+		return err
 	}
-	return err
 }
 
 func (peer *Peer) String() string {
