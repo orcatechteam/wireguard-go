@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -61,7 +62,13 @@ func (peer *Peer) keepKeyFreshReceiving() {
 	keypair := peer.keypairs.Current()
 	if keypair != nil && keypair.isInitiator && time.Since(keypair.created) > (RejectAfterTime-KeepaliveTimeout-RekeyTimeout) {
 		peer.timers.sentLastMinuteHandshake.Store(true)
-		peer.SendHandshakeInitiation(false)
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			if peer.device != nil {
+				peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
+			} else {
+				fmt.Printf("%v - Failed to send handshake initiation: %s\n", peer, err)
+			}
+		}
 	}
 }
 
@@ -331,7 +338,9 @@ func (device *Device) RoutineHandshake(id int) {
 				// verify MAC2 field
 
 				if !device.cookieChecker.CheckMAC2(elem.packet, elem.endpoint.DstToBytes()) {
-					device.SendHandshakeCookie(&elem)
+					if err := device.SendHandshakeCookie(&elem); err != nil {
+						device.log.Errorf("%v - Failed to send handshake cookie: %s", err)
+					}
 					goto skip
 				}
 
@@ -381,7 +390,10 @@ func (device *Device) RoutineHandshake(id int) {
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
-			peer.SendHandshakeResponse()
+			if err = peer.SendHandshakeResponse(); err != nil {
+				device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
+				goto skip
+			}
 
 		case MessageResponseType:
 
@@ -417,7 +429,6 @@ func (device *Device) RoutineHandshake(id int) {
 			// derive keypair
 
 			err = peer.BeginSymmetricSession()
-
 			if err != nil {
 				device.log.Errorf("%v - Failed to derive keypair: %v", peer, err)
 				goto skip
