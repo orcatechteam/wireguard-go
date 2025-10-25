@@ -1,12 +1,11 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -77,23 +76,22 @@ func (elem *QueueOutboundElement) clearPointers() {
 	elem.peer = nil
 }
 
-/* Queues a keepalive if no packets are queued for peer
- */
-func (peer *Peer) SendKeepalive() {
+// SendKeepalive Queues a keepalive if no packets are queued for peer
+func (peer *Peer) SendKeepalive() error {
 	if len(peer.queue.staged) == 0 && peer.isRunning.Load() {
 		elem := peer.device.NewOutboundElement()
 		elemsContainer := peer.device.GetOutboundElementsContainer()
 		elemsContainer.elems = append(elemsContainer.elems, elem)
 		select {
 		case peer.queue.staged <- elemsContainer:
-			peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
+			//peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
 		default:
 			peer.device.PutMessageBuffer(elem.buffer)
 			peer.device.PutOutboundElement(elem)
 			peer.device.PutOutboundElementsContainer(elemsContainer)
 		}
 	}
-	peer.SendStagedPackets()
+	return peer.SendStagedPackets()
 }
 
 func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
@@ -116,28 +114,28 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
 
-	peer.device.log.Verbosef("%v - Sending handshake initiation", peer)
-
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
 		return err
 	}
 
-	var buf [MessageInitiationSize]byte
-	writer := bytes.NewBuffer(buf[:0])
-	binary.Write(writer, binary.LittleEndian, msg)
-	packet := writer.Bytes()
+	packet := make([]byte, MessageInitiationSize)
+	_ = msg.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendBuffers([][]byte{packet})
+	buffers := peer.getBuffers(packet)
+	err = peer.SendBuffers(buffers)
+	peer.putBuffers(buffers)
 	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
 	}
-	peer.timersHandshakeInitiated()
+	if err == nil {
+		peer.timersHandshakeInitiated()
+	}
 
 	return err
 }
@@ -147,18 +145,14 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
 
-	peer.device.log.Verbosef("%v - Sending handshake response", peer)
-
 	response, err := peer.device.CreateMessageResponse(peer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create response message: %v", peer, err)
 		return err
 	}
 
-	var buf [MessageResponseSize]byte
-	writer := bytes.NewBuffer(buf[:0])
-	binary.Write(writer, binary.LittleEndian, response)
-	packet := writer.Bytes()
+	packet := make([]byte, MessageResponseSize)
+	_ = response.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 
 	err = peer.BeginSymmetricSession()
@@ -171,8 +165,9 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	// TODO: allocation could be avoided
-	err = peer.SendBuffers([][]byte{packet})
+	buffers := peer.getBuffers(packet)
+	err = peer.SendBuffers(buffers)
+	peer.putBuffers(buffers)
 	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
@@ -180,8 +175,6 @@ func (peer *Peer) SendHandshakeResponse() error {
 }
 
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
-	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
-
 	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])
 	reply, err := device.cookieChecker.CreateReply(initiatingElem.packet, sender, initiatingElem.endpoint.DstToBytes())
 	if err != nil {
@@ -189,12 +182,14 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 		return err
 	}
 
-	var buf [MessageCookieReplySize]byte
-	writer := bytes.NewBuffer(buf[:0])
-	binary.Write(writer, binary.LittleEndian, reply)
-	// TODO: allocation could be avoided
-	device.net.bind.Send([][]byte{writer.Bytes()}, initiatingElem.endpoint)
-	return nil
+	packet := make([]byte, MessageCookieReplySize)
+	if err = reply.marshal(packet); err != nil {
+		return err
+	}
+	buffers := device.getBuffers(packet)
+	err = device.net.bind.Send(buffers, initiatingElem.endpoint)
+	device.putBuffers(buffers)
+	return err
 }
 
 func (peer *Peer) keepKeyFreshSending() {
@@ -204,7 +199,9 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 	nonce := keypair.sendNonce.Load()
 	if nonce > RekeyAfterMessages || (keypair.isInitiator && time.Since(keypair.created) > RekeyAfterTime) {
-		peer.SendHandshakeInitiation(false)
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			peer.device.log.Verbosef("Sent handshake initiation failed in send staged packets: %s", err)
+		}
 	}
 }
 
@@ -213,15 +210,12 @@ func (device *Device) AllowedIPs() *AllowedIPs {
 }
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
-		device.log.Verbosef("Routine: TUN reader - stopped")
 		device.state.stopping.Done()
 		device.queue.encryption.wg.Done()
 	}()
 
 	wg := sync.WaitGroup{}
 	defer wg.Wait()
-
-	device.log.Verbosef("Routine: TUN reader - started")
 
 	var (
 		batchSize   = device.BatchSize()
@@ -251,7 +245,6 @@ func (device *Device) RoutineReadFromTUN() {
 	for {
 		// read packets
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
-		//device.log.Verbosef("Routine: TUN reader - read %d bytes", count)
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue
@@ -297,7 +290,9 @@ func (device *Device) RoutineReadFromTUN() {
 		for peer, elemsForPeer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				peer.StagePackets(elemsForPeer)
-				peer.SendStagedPackets()
+				if err := peer.SendStagedPackets(); err != nil && errors.Is(err, net.ErrClosed) {
+					peer.Stop()
+				}
 			} else {
 				for _, elem := range elemsForPeer.elems {
 					device.PutMessageBuffer(elem.buffer)
@@ -350,16 +345,21 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	}
 }
 
-func (peer *Peer) SendStagedPackets() {
+func (peer *Peer) SendStagedPackets() error {
 top:
 	if len(peer.queue.staged) == 0 || !peer.device.isUp() {
-		return
+		return nil
 	}
 
 	keypair := peer.keypairs.Current()
 	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
-		peer.SendHandshakeInitiation(false)
-		return
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			peer.device.log.Verbosef("Sent handshake initiation failed in send staged packets: " + err.Error())
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
+		}
+		return nil
 	}
 
 	for {
@@ -412,7 +412,7 @@ top:
 				goto top
 			}
 		default:
-			return
+			return nil
 		}
 	}
 }
@@ -447,17 +447,13 @@ func calculatePaddingSize(packetSize, mtu int) int {
 	return paddedSize - lastUnit
 }
 
-/* Encrypts the elements in the queue
- * and marks them for sequential consumption (by releasing the mutex)
- *
- * Obs. One instance per core
- */
-func (device *Device) RoutineEncryption(id int) {
+// RoutineEncryption Encrypts the elements in the queue
+// and marks them for sequential consumption (by releasing the mutex)
+//
+// Obs. One instance per core
+func (device *Device) RoutineEncryption() {
 	var paddingZeros [PaddingMultiple]byte
 	var nonce [chacha20poly1305.NonceSize]byte
-
-	defer device.log.Verbosef("Routine: encryption worker %d - stopped", id)
-	device.log.Verbosef("Routine: encryption worker %d - started", id)
 
 	for elemsContainer := range device.queue.encryption.c {
 		//	device.log.Verbosef("Routine: encryption worker %d - received elem container count %d", id, len(elemsContainer.elems))
@@ -493,16 +489,13 @@ func (device *Device) RoutineEncryption(id int) {
 
 func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device := peer.device
-	defer func() {
-		defer device.log.Verbosef("%v - Routine: sequential sender - stopped", peer)
-		peer.stopping.Done()
-	}()
-	device.log.Verbosef("%v - Routine: sequential sender - started", peer)
+	defer peer.stopping.Done()
 
-	bufs := make([][]byte, 0, maxBatchSize)
+	buffers := make([][]byte, maxBatchSize)
+	n := 0
 
 	for elemsContainer := range peer.queue.outbound.c {
-		bufs = bufs[:0]
+		n = 0
 		if elemsContainer == nil {
 			return
 		}
@@ -518,6 +511,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 				device.PutMessageBuffer(elem.buffer)
 				device.PutOutboundElement(elem)
 			}
+			device.PutOutboundElementsContainer(elemsContainer)
 			continue
 		}
 		dataSent := false
@@ -526,13 +520,17 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
 			}
-			bufs = append(bufs, elem.packet)
+			buffers[n] = elem.packet
+			n++
 		}
 
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
 
-		err := peer.SendBuffers(bufs)
+		err := peer.SendBuffers(buffers[:n])
+		for i := 0; i < n; i++ {
+			buffers[i] = nil
+		}
 		if dataSent {
 			peer.timersDataSent()
 		}
@@ -541,14 +539,28 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			device.PutOutboundElement(elem)
 		}
 		device.PutOutboundElementsContainer(elemsContainer)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, errNoKnownEndpoint):
+		case errors.Is(err, net.ErrClosed):
+			// need to do in a go routine as stop waits for this routine to exit, add to device wait instead
+			peer.device.peers.stopping.Add(1)
+			go func() {
+				peer.device.peers.stopping.Done()
+				peer.Stop()
+			}()
+			device.log.Errorf("%v - peer disconnected: %v", peer, err)
+			// wait for stop to indicate that it is done, otherwise more processing will happen
+			for peer.isRunning.Load() {
+				time.Sleep(100 * time.Millisecond)
+			}
+			continue
+		default:
 			var errGSO conn.ErrUDPGSODisabled
 			if errors.As(err, &errGSO) {
 				device.log.Verbosef(err.Error())
 				err = errGSO.RetryErr
 			}
-		}
-		if err != nil && !errors.Is(err, errNoKnownEndpoint) {
 			device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
 			continue
 		}

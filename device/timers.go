@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  *
  * This is based heavily on timers.c from the kernel implementation.
  */
@@ -8,6 +8,8 @@
 package device
 
 import (
+	"errors"
+	"net"
 	"sync"
 	"time"
 	_ "unsafe"
@@ -77,37 +79,47 @@ func (peer *Peer) timersActive() bool {
 }
 
 func expiredRetransmitHandshake(peer *Peer) {
-	if peer.timers.handshakeAttempts.Load() > MaxTimerHandshakes {
-		peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
-
-		if peer.timersActive() {
-			peer.timers.sendKeepalive.Del()
-		}
-
-		/* We drop all packets without a keypair and don't try again,
-		 * if we try unsuccessfully for too long to make a handshake.
-		 */
-		peer.FlushStagedPackets()
-
-		/* We set a timer for destroying any residue that might be left
-		 * of a partial exchange.
-		 */
-		if peer.timersActive() && !peer.timers.zeroKeyMaterial.IsPending() {
-			peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
-		}
-	} else {
+	if peer.timers.handshakeAttempts.Load() <= MaxTimerHandshakes {
 		peer.timers.handshakeAttempts.Add(1)
 		peer.device.log.Verbosef("%s - Handshake did not complete after %d seconds, retrying (try %d)", peer, int(RekeyTimeout.Seconds()), peer.timers.handshakeAttempts.Load()+1)
 
 		/* We clear the endpoint address src address, in case this is the cause of trouble. */
 		peer.markEndpointSrcForClearing()
 
-		peer.SendHandshakeInitiation(true)
+		err := peer.SendHandshakeInitiation(true)
+		if err == nil {
+			peer.device.log.Verbosef("%s - Handshake expired and retransmitted", peer)
+			return
+		}
+		peer.device.log.Verbosef("%s - failed to send handshake initiation (type: %d)", peer, peer.timers.handshakeAttempts.Load()+1)
+		if !errors.Is(err, net.ErrClosed) {
+			return
+		}
+		peer.Stop()
+	} else {
+		peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
+	}
+	if peer.timersActive() {
+		peer.timers.sendKeepalive.Del()
+	}
+
+	/* We drop all packets without a keypair and don't try again,
+	 * if we try unsuccessfully for too long to make a handshake.
+	 */
+	peer.FlushStagedPackets()
+
+	/* We set a timer for destroying any residue that might be left
+	 * of a partial exchange.
+	 */
+	if peer.timersActive() && !peer.timers.zeroKeyMaterial.IsPending() {
+		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
 	}
 }
 
 func expiredSendKeepalive(peer *Peer) {
-	peer.SendKeepalive()
+	if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
+		peer.Stop()
+	}
 	if peer.timers.needAnotherKeepalive.Load() {
 		peer.timers.needAnotherKeepalive.Store(false)
 		if peer.timersActive() {
@@ -120,7 +132,12 @@ func expiredNewHandshake(peer *Peer) {
 	peer.device.log.Verbosef("%s - Retrying handshake because we stopped hearing back after %d seconds", peer, int((KeepaliveTimeout + RekeyTimeout).Seconds()))
 	/* We clear the endpoint address src address, in case this is the cause of trouble. */
 	peer.markEndpointSrcForClearing()
-	peer.SendHandshakeInitiation(false)
+	if err := peer.SendHandshakeInitiation(false); err != nil {
+		peer.device.log.Verbosef("%s - failed to send new handshake initiation", peer)
+		if errors.Is(err, net.ErrClosed) {
+			peer.Stop()
+		}
+	}
 }
 
 func expiredZeroKeyMaterial(peer *Peer) {
@@ -130,7 +147,9 @@ func expiredZeroKeyMaterial(peer *Peer) {
 
 func expiredPersistentKeepalive(peer *Peer) {
 	if peer.persistentKeepaliveInterval.Load() > 0 {
-		peer.SendKeepalive()
+		if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
+			peer.Stop()
+		}
 	}
 }
 
@@ -213,9 +232,11 @@ func (peer *Peer) timersStart() {
 }
 
 func (peer *Peer) timersStop() {
+	peer.device.log.Verbosef("%s - timersStopping", peer)
 	peer.timers.retransmitHandshake.DelSync()
 	peer.timers.sendKeepalive.DelSync()
 	peer.timers.newHandshake.DelSync()
 	peer.timers.zeroKeyMaterial.DelSync()
 	peer.timers.persistentKeepalive.DelSync()
+	peer.device.log.Verbosef("%s - timersStopped", peer)
 }

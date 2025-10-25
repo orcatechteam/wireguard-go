@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
+	"errors"
+	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -57,6 +59,7 @@ type Device struct {
 	peers struct {
 		sync.RWMutex // protects keyMap
 		keyMap       map[NoisePublicKey]*Peer
+		stopping     sync.WaitGroup
 	}
 
 	rate struct {
@@ -90,6 +93,24 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
+
+	bufferPool sync.Pool
+}
+
+func (device *Device) getBuffers(packet []byte) [][]byte {
+	if device.bufferPool.New == nil {
+		device.bufferPool.New = func() interface{} {
+			return make([][]byte, 1)
+		}
+	}
+	buffer := device.bufferPool.Get().([][]byte)
+	buffer[0] = packet
+	return buffer
+}
+
+func (device *Device) putBuffers(buffers [][]byte) {
+	buffers[0] = nil
+	device.bufferPool.Put(buffers)
 }
 
 // deviceState represents the state of a Device.
@@ -193,7 +214,9 @@ func (device *Device) upLocked() error {
 		device.log.Verbosef("%s: Starting after bringing device up", peer.endpoint.val)
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
-			peer.SendKeepalive()
+			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
+				peer.Stop()
+			}
 		}
 	}
 	device.peers.RUnlock()
@@ -326,8 +349,8 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.state.stopping.Wait()
 	device.queue.encryption.wg.Add(cpus) // One for each RoutineHandshake
 	for i := 0; i < cpus; i++ {
-		go device.RoutineEncryption(i + 1)
-		go device.RoutineDecryption(i + 1)
+		go device.RoutineEncryption()
+		go device.RoutineDecryption()
 		go device.RoutineHandshake(i + 1)
 	}
 
@@ -415,6 +438,8 @@ func (device *Device) Close() {
 
 	device.log.Verbosef("Device closed")
 	close(device.closed)
+
+	device.peers.stopping.Wait()
 }
 
 func (device *Device) Wait() chan struct{} {
@@ -432,7 +457,9 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			peer.SendKeepalive()
+			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
+				peer.Stop()
+			}
 		}
 	}
 	device.peers.RUnlock()

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package netstack
@@ -47,11 +47,11 @@ func NoPrintf(format string, a ...any) (n int, err error) { return n, err }
 type Net struct {
 	ep             *channel.Endpoint
 	Stack          *stack.Stack
-	notifyHandle   *channel.NotificationHandle
 	events         chan tun.Event
 	closed         chan bool
 	pktMu          sync.RWMutex
 	pktClosed      bool
+	notifyHandle   *channel.NotificationHandle
 	incomingPacket chan *buffer.View
 	mtu            int
 	dnsServers     []netip.Addr
@@ -79,7 +79,6 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	if err = dev.Stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt); err != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
-
 	dev.notifyHandle = dev.ep.AddNotify(dev)
 
 	if err = dev.Stack.CreateNIC(1, dev.ep); err != nil {
@@ -191,17 +190,18 @@ func (tun *Net) Close() error {
 
 	tun.Stack.RemoveNIC(1)
 	tun.Stack.Close()
-
 	tun.ep.RemoveNotify(tun.notifyHandle)
+	tun.ep.Close()
+
 	if tun.events != nil {
 		close(tun.events)
 	}
 
-	tun.ep.Close()
-
 	tun.pktMu.Lock()
 	tun.pktClosed = true
-	close(tun.incomingPacket)
+	if tun.incomingPacket != nil {
+		close(tun.incomingPacket)
+	}
 	tun.pktMu.Unlock()
 
 	return nil

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -8,7 +8,6 @@ package device
 import (
 	"container/list"
 	"errors"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +58,23 @@ type Peer struct {
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
+	bufferPool                  sync.Pool
+}
+
+func (peer *Peer) getBuffers(packet []byte) [][]byte {
+	if peer.bufferPool.New == nil {
+		peer.bufferPool.New = func() interface{} {
+			return make([][]byte, 1)
+		}
+	}
+	buffer := peer.bufferPool.Get().([][]byte)
+	buffer[0] = packet
+	return buffer
+}
+
+func (peer *Peer) putBuffers(buffers [][]byte) {
+	buffers[0] = nil
+	peer.bufferPool.Put(buffers)
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -145,10 +161,6 @@ func (peer *Peer) SendBuffers(buffers [][]byte) (err error) {
 		peer.txBytes.Add(totalLen)
 		peer.device.net.RUnlock()
 		return nil
-	case errors.Is(err, net.ErrClosed):
-		peer.device.net.RUnlock()
-		peer.Stop()
-		return err
 	default:
 		peer.device.net.RUnlock()
 		return err
@@ -196,7 +208,7 @@ func (peer *Peer) Start() {
 	}
 
 	device := peer.device
-	device.log.Verbosef("%v - Starting", peer)
+	//device.log.Verbosef("%v - Starting", peer)
 
 	// reset routine state
 	peer.stopping.Wait()
@@ -275,7 +287,7 @@ func (peer *Peer) Stop() {
 		return
 	}
 
-	peer.device.log.Verbosef("%v - Stopping", peer)
+	//peer.device.log.Verbosef("%v - Stopping", peer)
 
 	peer.timersStop()
 	// Signal that RoutineSequentialSender and RoutineSequentialReceiver should exit.

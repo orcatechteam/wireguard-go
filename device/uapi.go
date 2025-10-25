@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
@@ -268,9 +268,13 @@ func (peer *ipcSetPeer) handlePostConfig() {
 		peer.device.log.Verbosef("%s - UAPI: Starting endpoint %s", peer.Peer, peer.endpoint.val)
 		peer.Start()
 		if peer.pkaOn {
-			peer.SendKeepalive()
+			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
+				peer.Stop()
+			}
 		}
-		peer.SendStagedPackets()
+		if err := peer.SendStagedPackets(); err != nil && errors.Is(err, net.ErrClosed) {
+			peer.Stop()
+		}
 	}
 }
 
@@ -374,7 +378,14 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 		device.allowedips.RemoveByPeer(peer.Peer)
 
 	case "allowed_ip":
-		device.log.Verbosef("%v - UAPI: Adding allowedip", peer.Peer)
+		add := true
+		verb := "Adding"
+		if len(value) > 0 && value[0] == '-' {
+			add = false
+			verb = "Removing"
+			value = value[1:]
+		}
+		device.log.Verbosef("%v - UAPI: %s allowedip", peer.Peer, verb)
 		prefix, err := netip.ParsePrefix(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set allowed ip: %w", err)
@@ -382,7 +393,11 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 		if peer.dummy {
 			return nil
 		}
-		device.allowedips.Insert(prefix, peer.Peer)
+		if add {
+			device.allowedips.Insert(prefix, peer.Peer)
+		} else {
+			device.allowedips.Remove(prefix, peer.Peer)
+		}
 
 	case "protocol_version":
 		if value != "1" {

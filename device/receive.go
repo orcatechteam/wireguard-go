@@ -1,15 +1,13 @@
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
 package device
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -62,12 +60,8 @@ func (peer *Peer) keepKeyFreshReceiving() {
 	keypair := peer.keypairs.Current()
 	if keypair != nil && keypair.isInitiator && time.Since(keypair.created) > (RejectAfterTime-KeepaliveTimeout-RekeyTimeout) {
 		peer.timers.sentLastMinuteHandshake.Store(true)
-		if err := peer.SendHandshakeInitiation(false); err != nil {
-			if peer.device != nil {
-				peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
-			} else {
-				fmt.Printf("%v - Failed to send handshake initiation: %s\n", peer, err)
-			}
+		if err := peer.SendHandshakeInitiation(false); err != nil && peer.device != nil {
+			peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
 		}
 	}
 }
@@ -79,13 +73,10 @@ func (peer *Peer) keepKeyFreshReceiving() {
 func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
 	recvName := recv.PrettyName()
 	defer func() {
-		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
 		device.queue.decryption.wg.Done()
 		device.queue.handshake.wg.Done()
 		device.net.stopping.Done()
 	}()
-
-	device.log.Verbosef("Routine: receive incoming %s - started", recvName)
 
 	// receive datagrams until conn is closed
 
@@ -243,11 +234,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	}
 }
 
-func (device *Device) RoutineDecryption(id int) {
+func (device *Device) RoutineDecryption() {
 	var nonce [chacha20poly1305.NonceSize]byte
-
-	defer device.log.Verbosef("Routine: decryption worker %d - stopped", id)
-	device.log.Verbosef("Routine: decryption worker %d - started", id)
 
 	for elemsContainer := range device.queue.decryption.c {
 		for _, elem := range elemsContainer.elems {
@@ -266,7 +254,6 @@ func (device *Device) RoutineDecryption(id int) {
 				content,
 				nil,
 			)
-			_, _ = Printf("Decrypted: %s, %X\n", elem.endpoint.DstToString(), elem.packet)
 			if err != nil {
 				elem.packet = nil
 			}
@@ -277,15 +264,9 @@ func (device *Device) RoutineDecryption(id int) {
 
 // RoutineHandshake handles incoming packets related to handshake
 func (device *Device) RoutineHandshake(id int) {
-	defer func() {
-		device.log.Verbosef("Routine: handshake worker %d - stopped", id)
-		device.queue.encryption.wg.Done()
-	}()
-	device.log.Verbosef("Routine: handshake worker %d - started", id)
+	defer device.queue.encryption.wg.Done()
 
 	for elem := range device.queue.handshake.c {
-
-		//device.log.Verbosef("Routine: handshake worker %d - received element %d", id, elem.msgType)
 
 		// handle cookie fields and rate limiting
 
@@ -296,10 +277,8 @@ func (device *Device) RoutineHandshake(id int) {
 			// unmarshal packet
 
 			var reply MessageCookieReply
-			reader := bytes.NewReader(elem.packet)
-			err := binary.Read(reader, binary.LittleEndian, &reply)
+			err := reply.unmarshal(elem.packet)
 			if err != nil {
-				device.log.Verbosef("Failed to decode cookie reply")
 				goto skip
 			}
 
@@ -314,9 +293,8 @@ func (device *Device) RoutineHandshake(id int) {
 			// consume reply
 
 			if peer := entry.peer; peer.isRunning.Load() {
-				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
-					device.log.Verbosef("Could not decrypt invalid cookie response")
+					device.log.Verbosef("Routine: handshake: could not decrypt invalid cookie response")
 				}
 			}
 
@@ -331,15 +309,16 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
-			// endpoints destination address is the source of the datagram
+			// endpoint destination address is the source of the datagram
 
 			if device.IsUnderLoad() {
 
 				// verify MAC2 field
 
 				if !device.cookieChecker.CheckMAC2(elem.packet, elem.endpoint.DstToBytes()) {
+					device.log.Verbosef("Routine: handshake: sending handshake cookie")
 					if err := device.SendHandshakeCookie(&elem); err != nil {
-						device.log.Errorf("%v - Failed to send handshake cookie: %s", err)
+						device.log.Errorf("Routine: handshake: failed to send handshake cookie: %s", err)
 					}
 					goto skip
 				}
@@ -352,7 +331,7 @@ func (device *Device) RoutineHandshake(id int) {
 			}
 
 		default:
-			device.log.Errorf("Invalid packet ended up in the handshake queue")
+			device.log.Errorf("Routine: handshake: invalid packet ended up in the handshake queue")
 			goto skip
 		}
 
@@ -364,10 +343,9 @@ func (device *Device) RoutineHandshake(id int) {
 			// unmarshal
 
 			var msg MessageInitiation
-			reader := bytes.NewReader(elem.packet)
-			err := binary.Read(reader, binary.LittleEndian, &msg)
+			err := msg.unmarshal(elem.packet)
 			if err != nil {
-				device.log.Errorf("Failed to decode initiation message")
+				device.log.Errorf("Routine: handshake: failed to decode initiation message")
 				goto skip
 			}
 
@@ -375,7 +353,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer := device.ConsumeMessageInitiation(&msg)
 			if peer == nil {
-				device.log.Verbosef("Received invalid initiation message from %s", elem.endpoint)
+				device.log.Verbosef("Routine: handshake: received invalid initiation message from %s", elem.endpoint)
 				goto skip
 			}
 
@@ -387,11 +365,9 @@ func (device *Device) RoutineHandshake(id int) {
 			// update endpoint
 			peer.SetEndpointFromPacket(elem.endpoint)
 
-			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
-
 			if err = peer.SendHandshakeResponse(); err != nil {
-				device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
+				device.log.Errorf("Routine: handshake: failed to send handshake response: %v", peer, err)
 				goto skip
 			}
 
@@ -400,10 +376,9 @@ func (device *Device) RoutineHandshake(id int) {
 			// unmarshal
 
 			var msg MessageResponse
-			reader := bytes.NewReader(elem.packet)
-			err := binary.Read(reader, binary.LittleEndian, &msg)
+			err := msg.unmarshal(elem.packet)
 			if err != nil {
-				device.log.Errorf("Failed to decode response message")
+				device.log.Errorf("Routine: handshake: failed to decode response message")
 				goto skip
 			}
 
@@ -411,14 +386,13 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer := device.ConsumeMessageResponse(&msg)
 			if peer == nil {
-				device.log.Verbosef("Received invalid response message from %s", elem.endpoint.DstToString())
+				device.log.Verbosef("Routine: handshake: %s: received invalid response message", elem.endpoint)
 				goto skip
 			}
 
 			// update endpoint
 			peer.SetEndpointFromPacket(elem.endpoint)
 
-			device.log.Verbosef("%v - Received handshake response", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
 			// update timers
@@ -430,13 +404,13 @@ func (device *Device) RoutineHandshake(id int) {
 
 			err = peer.BeginSymmetricSession()
 			if err != nil {
-				device.log.Errorf("%v - Failed to derive keypair: %v", peer, err)
+				device.log.Errorf("Routine: handshake: %s: failed to derive keypair: %v", peer, err)
 				goto skip
 			}
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
-			peer.SendKeepalive()
+			_ = peer.SendKeepalive()
 		}
 	skip:
 		device.PutMessageBuffer(elem.buffer)
@@ -445,22 +419,17 @@ func (device *Device) RoutineHandshake(id int) {
 
 func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	device := peer.device
-	defer func() {
-		device.log.Verbosef("%v - Routine: sequential receiver - stopped", peer)
-		peer.stopping.Done()
-	}()
-	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
+	defer peer.stopping.Done()
 
 	bufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.inbound.c {
 
-		//device.log.Verbosef("%v - Routine: sequential receiver - received container", peer)
-
 		if elemsContainer == nil {
 			return
 		}
 		elemsContainer.Lock()
+
 		validTailPacket := -1
 		dataPacketReceived := false
 		rxBytesLen := uint64(0)
@@ -478,12 +447,12 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			if peer.ReceivedWithKeypair(elem.keypair) {
 				peer.SetEndpointFromPacket(elem.endpoint)
 				peer.timersHandshakeComplete()
-				peer.SendStagedPackets()
+				_ = peer.SendStagedPackets()
 			}
 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
 			if len(elem.packet) == 0 {
-				device.log.Verbosef("%v - Receiving keepalive packet", peer)
+				//device.log.Verbosef("%v - Receiving keepalive packet", peer)
 				continue
 			}
 			dataPacketReceived = true
@@ -501,7 +470,6 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				elem.packet = elem.packet[:length]
 				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
 
-				Printf("Checking allowed IP: %X\n", src)
 				if device.allowedips.Lookup(src) != peer {
 					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 					continue
@@ -529,7 +497,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				continue
 			}
 
-			_, _ = Printf("ENDPOINT: %s -> %s\n", elem.endpoint.SrcToString(), elem.endpoint.DstToString())
+			//_, _ = Printf("ENDPOINT: %s -> %s\n", elem.endpoint.SrcToString(), elem.endpoint.DstToString())
 			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
 		}
 
