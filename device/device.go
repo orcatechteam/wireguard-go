@@ -6,8 +6,7 @@
 package device
 
 import (
-	"errors"
-	"net"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -151,7 +150,7 @@ func (device *Device) isUp() bool {
 func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
 	// stop routing and processing of packets
 	device.allowedips.RemoveByPeer(peer)
-	peer.Stop()
+	peer.Stop(true)
 
 	// remove from peer map
 	delete(device.peers.keyMap, key)
@@ -214,10 +213,9 @@ func (device *Device) upLocked() error {
 		device.log.Verbosef("%s: Starting after bringing device up", peer.endpoint.val)
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
-			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-				peer.Stop()
-			}
+			peer.handleErrorf("failed to send keep alive", peer.SendKeepalive())
 		}
+		peer.handleErrorf("failed to send staged packets", peer.SendStagedPackets())
 	}
 	device.peers.RUnlock()
 	device.log.Verbosef("Device up")
@@ -236,7 +234,7 @@ func (device *Device) downLocked() error {
 
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
-		peer.Stop()
+		peer.Stop(true)
 	}
 	device.peers.RUnlock()
 	device.log.Verbosef("Device down")
@@ -375,15 +373,15 @@ func (device *Device) BatchSize() int {
 	return size
 }
 
-func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
+func (device *Device) LookupPeer(pk NoisePublicKey) (*Peer, error) {
 	device.peers.RLock()
 	defer device.peers.RUnlock()
 
 	p, ok := device.peers.keyMap[pk]
 	if !ok {
-		device.log.Verbosef("Peer with public key %02x not found", pk)
+		return nil, fmt.Errorf("peer with public key %02x not found", pk)
 	}
-	return p
+	return p, nil
 }
 
 func (device *Device) RemovePeer(key NoisePublicKey) {
@@ -457,9 +455,7 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-				peer.Stop()
-			}
+			peer.handleErrorf("failed to send keepalive", peer.SendKeepalive())
 		}
 	}
 	device.peers.RUnlock()

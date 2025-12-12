@@ -87,6 +87,7 @@ func (table *IndexTable) NewIndexForHandshake(peer *Peer, handshake *Handshake) 
 			keypair:   nil,
 		}
 		table.Unlock()
+
 		return index, nil
 	}
 }

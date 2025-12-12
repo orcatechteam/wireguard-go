@@ -8,6 +8,7 @@ package device
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -53,17 +54,18 @@ func (elem *QueueInboundElement) clearPointers() {
  *
  * NOTE: Not thread safe, but called by sequential receiver!
  */
-func (peer *Peer) keepKeyFreshReceiving() {
+func (peer *Peer) keepKeyFreshReceiving() error {
 	if peer.timers.sentLastMinuteHandshake.Load() {
-		return
+		return nil
 	}
 	keypair := peer.keypairs.Current()
 	if keypair != nil && keypair.isInitiator && time.Since(keypair.created) > (RejectAfterTime-KeepaliveTimeout-RekeyTimeout) {
 		peer.timers.sentLastMinuteHandshake.Store(true)
 		if err := peer.SendHandshakeInitiation(false); err != nil && peer.device != nil {
-			peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
+			return fmt.Errorf("failed to send handshake initiation: %w", err)
 		}
 	}
+	return nil
 }
 
 // RoutineReceiveIncoming Receives incoming datagrams for the device
@@ -265,6 +267,8 @@ func (device *Device) RoutineDecryption() {
 // RoutineHandshake handles incoming packets related to handshake
 func (device *Device) RoutineHandshake(id int) {
 	defer device.queue.encryption.wg.Done()
+	defer device.log.Verbosef("Routine: handshake worker %d - stopped", id)
+	device.log.Verbosef("Routine: handshake worker %d - started", id)
 
 	for elem := range device.queue.handshake.c {
 
@@ -351,9 +355,13 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// consume initiation
 
-			peer := device.ConsumeMessageInitiation(&msg)
-			if peer == nil {
-				device.log.Verbosef("Routine: handshake: received invalid initiation message from %s", elem.endpoint)
+			peer, err := device.ConsumeMessageInitiation(&msg)
+			if err != nil {
+				if peer != nil {
+					peer.handleErrorf("received invalid initiation message", err)
+				} else {
+					device.log.Errorf("Routine: handshake: %s: received invalid initiation message: %w", elem.endpoint, err)
+				}
 				goto skip
 			}
 
@@ -365,10 +373,15 @@ func (device *Device) RoutineHandshake(id int) {
 			// update endpoint
 			peer.SetEndpointFromPacket(elem.endpoint)
 
+			sendKeepAlive := false
+			if !peer.isRunning.Load() {
+				peer.Start()
+				sendKeepAlive = peer.persistentKeepaliveInterval.Load() > 0
+			}
+
 			peer.rxBytes.Add(uint64(len(elem.packet)))
-			if err = peer.SendHandshakeResponse(); err != nil {
-				device.log.Errorf("Routine: handshake: failed to send handshake response: %v", peer, err)
-				goto skip
+			if !peer.handleErrorf("failed to send handshake response", peer.SendHandshakeResponse()) && sendKeepAlive {
+				peer.handleErrorf("failed to send keep alive: %w", peer.SendKeepalive())
 			}
 
 		case MessageResponseType:
@@ -383,8 +396,13 @@ func (device *Device) RoutineHandshake(id int) {
 			}
 
 			// consume response
+			device.log.Verbosef("received handshake response (sender: %d, received: %d)", msg.Sender, msg.Receiver)
 
-			peer := device.ConsumeMessageResponse(&msg)
+			peer, err := device.ConsumeMessageResponse(&msg)
+			if err != nil {
+				device.log.Errorf("Routine: handshake: %s: received invalid response message: %s", elem.endpoint, err)
+				goto skip
+			}
 			if peer == nil {
 				device.log.Verbosef("Routine: handshake: %s: received invalid response message", elem.endpoint)
 				goto skip
@@ -402,15 +420,14 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// derive keypair
 
-			err = peer.BeginSymmetricSession()
-			if err != nil {
-				device.log.Errorf("Routine: handshake: %s: failed to derive keypair: %v", peer, err)
+			if err = peer.BeginSymmetricSession(); err != nil {
+				peer.handleErrorf("failed to begin symmetric session", err)
 				goto skip
 			}
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
-			_ = peer.SendKeepalive()
+			peer.handleErrorf("failed to send keep alive", peer.SendKeepalive())
 		}
 	skip:
 		device.PutMessageBuffer(elem.buffer)
@@ -428,6 +445,11 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		if elemsContainer == nil {
 			return
 		}
+		// if stopping, drain the channel until we get the exit (nil)
+		if !peer.isRunning.Load() {
+			continue
+		}
+
 		elemsContainer.Lock()
 
 		validTailPacket := -1
@@ -447,7 +469,9 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			if peer.ReceivedWithKeypair(elem.keypair) {
 				peer.SetEndpointFromPacket(elem.endpoint)
 				peer.timersHandshakeComplete()
-				_ = peer.SendStagedPackets()
+				if peer.handleErrorf("failed to send staged packets", peer.SendStagedPackets()) {
+					continue
+				}
 			}
 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
@@ -504,7 +528,9 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		peer.rxBytes.Add(rxBytesLen)
 		if validTailPacket >= 0 {
 			peer.SetEndpointFromPacket(elemsContainer.elems[validTailPacket].endpoint)
-			peer.keepKeyFreshReceiving()
+			if peer.handleErrorf("failed to keep key fresh receiving", peer.keepKeyFreshReceiving()) {
+				continue
+			}
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 		}
@@ -524,4 +550,16 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		bufs = bufs[:0]
 		device.PutInboundElementsContainer(elemsContainer)
 	}
+}
+
+func (peer *Peer) handleErrorf(fmt string, err error) bool {
+	if err == nil {
+		return false
+	}
+	peer.device.log.Errorf("%s: "+fmt+": %s", peer, err)
+	if errors.Is(err, net.ErrClosed) { //|| errors.Is(err, errNoKnownEndpoint) {
+		peer.stopInRoutine(false)
+		return true
+	}
+	return false
 }

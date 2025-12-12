@@ -8,8 +8,7 @@
 package device
 
 import (
-	"errors"
-	"net"
+	"fmt"
 	"sync"
 	"time"
 	_ "unsafe"
@@ -86,19 +85,16 @@ func expiredRetransmitHandshake(peer *Peer) {
 		/* We clear the endpoint address src address, in case this is the cause of trouble. */
 		peer.markEndpointSrcForClearing()
 
-		err := peer.SendHandshakeInitiation(true)
-		if err == nil {
+		if err := peer.SendHandshakeInitiation(true); err != nil {
+			peer.handleErrorf(fmt.Sprintf("failed to send handshake initiation (type: %d)", peer.timers.handshakeAttempts.Load()+1), err)
+		} else {
 			peer.device.log.Verbosef("%s - Handshake expired and retransmitted", peer)
-			return
 		}
-		peer.device.log.Verbosef("%s - failed to send handshake initiation (type: %d)", peer, peer.timers.handshakeAttempts.Load()+1)
-		if !errors.Is(err, net.ErrClosed) {
-			return
-		}
-		peer.Stop()
-	} else {
-		peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
+		return
 	}
+
+	peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
+
 	if peer.timersActive() {
 		peer.timers.sendKeepalive.Del()
 	}
@@ -114,16 +110,18 @@ func expiredRetransmitHandshake(peer *Peer) {
 	if peer.timersActive() && !peer.timers.zeroKeyMaterial.IsPending() {
 		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
 	}
+
+	// need to do in a go routine as stop waits for this routine to exit, add to device wait instead
+	peer.stopInRoutine(false)
 }
 
 func expiredSendKeepalive(peer *Peer) {
-	if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-		peer.Stop()
-	}
-	if peer.timers.needAnotherKeepalive.Load() {
-		peer.timers.needAnotherKeepalive.Store(false)
-		if peer.timersActive() {
-			peer.timers.sendKeepalive.Mod(KeepaliveTimeout)
+	if !peer.handleErrorf("failed to send keep alive", peer.SendKeepalive()) {
+		if peer.timers.needAnotherKeepalive.Load() {
+			peer.timers.needAnotherKeepalive.Store(false)
+			if peer.timersActive() {
+				peer.timers.sendKeepalive.Mod(KeepaliveTimeout)
+			}
 		}
 	}
 }
@@ -132,12 +130,7 @@ func expiredNewHandshake(peer *Peer) {
 	peer.device.log.Verbosef("%s - Retrying handshake because we stopped hearing back after %d seconds", peer, int((KeepaliveTimeout + RekeyTimeout).Seconds()))
 	/* We clear the endpoint address src address, in case this is the cause of trouble. */
 	peer.markEndpointSrcForClearing()
-	if err := peer.SendHandshakeInitiation(false); err != nil {
-		peer.device.log.Verbosef("%s - failed to send new handshake initiation", peer)
-		if errors.Is(err, net.ErrClosed) {
-			peer.Stop()
-		}
-	}
+	peer.handleErrorf("failed to send new handshake initiation", peer.SendHandshakeInitiation(false))
 }
 
 func expiredZeroKeyMaterial(peer *Peer) {
@@ -146,11 +139,9 @@ func expiredZeroKeyMaterial(peer *Peer) {
 }
 
 func expiredPersistentKeepalive(peer *Peer) {
-	if peer.persistentKeepaliveInterval.Load() > 0 {
-		if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-			peer.Stop()
-		}
-	}
+	// ensure the peer has been started
+	peer.Start()
+	peer.handleErrorf("failed to send persistent keep alive", peer.SendKeepalive())
 }
 
 /* Should be called after an authenticated data packet is sent. */
@@ -212,7 +203,7 @@ func (peer *Peer) timersSessionDerived() {
 /* Should be called before a packet with authentication -- keepalive, data, or handshake -- is sent, or after one is received. */
 func (peer *Peer) timersAnyAuthenticatedPacketTraversal() {
 	keepalive := peer.persistentKeepaliveInterval.Load()
-	if keepalive > 0 && peer.timersActive() {
+	if keepalive > 0 && peer.timersActive() && peer.timers.persistentKeepalive != nil {
 		peer.timers.persistentKeepalive.Mod(time.Duration(keepalive) * time.Second)
 	}
 }
@@ -222,6 +213,10 @@ func (peer *Peer) timersInit() {
 	peer.timers.sendKeepalive = peer.NewTimer(expiredSendKeepalive)
 	peer.timers.newHandshake = peer.NewTimer(expiredNewHandshake)
 	peer.timers.zeroKeyMaterial = peer.NewTimer(expiredZeroKeyMaterial)
+}
+
+func (peer *Peer) initPersistentKeepAliveTimer() {
+	peer.device.log.Verbosef("%v - starting keep alive", peer)
 	peer.timers.persistentKeepalive = peer.NewTimer(expiredPersistentKeepalive)
 }
 
@@ -232,11 +227,8 @@ func (peer *Peer) timersStart() {
 }
 
 func (peer *Peer) timersStop() {
-	peer.device.log.Verbosef("%s - timersStopping", peer)
 	peer.timers.retransmitHandshake.DelSync()
 	peer.timers.sendKeepalive.DelSync()
 	peer.timers.newHandshake.DelSync()
 	peer.timers.zeroKeyMaterial.DelSync()
-	peer.timers.persistentKeepalive.DelSync()
-	peer.device.log.Verbosef("%s - timersStopped", peer)
 }

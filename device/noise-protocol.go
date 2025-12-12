@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
@@ -249,7 +248,6 @@ func (h *Handshake) Clear() {
 	setZero(h.remoteEphemeral[:])
 	setZero(h.chainKey[:])
 	setZero(h.hash[:])
-	h.localIndex = 0
 	h.state = handshakeZeroed
 }
 
@@ -269,6 +267,7 @@ func init() {
 }
 
 func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, error) {
+	device.log.Verbosef("%s - create message initiation", peer)
 	device.staticIdentity.RLock()
 	defer device.staticIdentity.RUnlock()
 
@@ -335,18 +334,20 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 
 	handshake.mixHash(msg.Timestamp[:])
 	handshake.state = handshakeInitiationCreated
+
+	device.log.Verbosef("%s - created message initiation (sender: %d)", peer, msg.Sender)
 	return &msg, nil
 }
 
-func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
+func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) (*Peer, error) {
+	device.log.Verbosef("consume message initiation: (sender: %d)", msg.Sender)
 	var (
 		hash     [blake2s.Size]byte
 		chainKey [blake2s.Size]byte
 	)
 
 	if msg.Type != MessageInitiationType {
-		device.log.Errorf("ConsumeMessageInitiation: invalid message type %d", msg.Type)
-		return nil
+		return nil, fmt.Errorf("expected message type %d, received: %d", MessageInitiationType, msg.Type)
 	}
 
 	device.staticIdentity.RLock()
@@ -361,32 +362,23 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	var key [chacha20poly1305.KeySize]byte
 	ss, err := device.staticIdentity.privateKey.sharedSecret(msg.Ephemeral)
 	if err != nil {
-		device.log.Errorf("ConsumeMessageInitiation: shared secret failed: %s", err)
-		return nil
+		return nil, err
 	}
 	KDF2(&chainKey, &key, chainKey[:], ss[:])
-	aead, _ := chacha20poly1305.New(key[:])
-	_, err = aead.Open(peerPK[:0], ZeroNonce[:], msg.Static[:], hash[:])
+	aead, err := chacha20poly1305.New(key[:])
 	if err != nil {
-		device.log.Errorf("ConsumeMessageInitiation: failed to open aead: %s", err)
-		return nil
+		return nil, err
+	}
+	if _, err = aead.Open(peerPK[:0], ZeroNonce[:], msg.Static[:], hash[:]); err != nil {
+		return nil, err
 	}
 	mixHash(&hash, &hash, msg.Static[:])
 
 	// lookup peer
 
-	peer := device.LookupPeer(peerPK)
-	if peer == nil {
-		device.log.Errorf("ConsumeMessageInitiation: failed to lookup peer")
-		return nil
-	}
-	if !peer.isRunning.Load() {
-		peer.Start()
-		if peer.persistentKeepaliveInterval.Load() > 0 {
-			if err = peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-				peer.Stop()
-			}
-		}
+	peer, err := device.LookupPeer(peerPK)
+	if err != nil {
+		return nil, err
 	}
 
 	handshake := &peer.handshake
@@ -399,8 +391,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 
 	if isZero(handshake.precomputedStaticStatic[:]) {
 		handshake.mutex.RUnlock()
-		device.log.Errorf("%v - ConsumeMessageInitiation: failed precomputed static", peer)
-		return nil
+		return peer, fmt.Errorf("%s: failed to consume precomputed static", peer)
 	}
 	KDF2(
 		&chainKey,
@@ -409,11 +400,9 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 		handshake.precomputedStaticStatic[:],
 	)
 	aead, _ = chacha20poly1305.New(key[:])
-	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
-	if err != nil {
+	if _, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:]); err != nil {
 		handshake.mutex.RUnlock()
-		device.log.Verbosef("%v - ConsumeMessageInitiation: aead open failed", peer, err)
-		return nil
+		return peer, fmt.Errorf("%s: aead open failed: %w", peer, err)
 	}
 	mixHash(&hash, &hash, msg.Timestamp[:])
 
@@ -423,12 +412,10 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
 	handshake.mutex.RUnlock()
 	if replay {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
-		return nil
+		return peer, fmt.Errorf("%s: handshake replay @ %s", peer, timestamp)
 	}
 	if flood {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake flood", peer)
-		return nil
+		return peer, fmt.Errorf("%s: handshake flood", peer)
 	}
 
 	// update handshake state
@@ -453,10 +440,11 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	setZero(hash[:])
 	setZero(chainKey[:])
 
-	return peer
+	return peer, nil
 }
 
 func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error) {
+	device.log.Verbosef("%s: create message response", peer)
 	handshake := &peer.handshake
 	handshake.mutex.Lock()
 	defer handshake.mutex.Unlock()
@@ -524,17 +512,19 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 	return &msg, nil
 }
 
-func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
+func (device *Device) ConsumeMessageResponse(msg *MessageResponse) (*Peer, error) {
+	device.log.Verbosef("consume message response: (sender: %d, receiver: %d)", msg.Sender, msg.Receiver)
+
 	if msg.Type != MessageResponseType {
-		return nil
+		return nil, fmt.Errorf("expecting message type %d, received: %d", MessageResponseType, msg.Type)
 	}
 
 	// lookup handshake by receiver
-
+	device.log.Verbosef("looking up peer with index %d", msg.Receiver)
 	lookup := device.indexTable.Lookup(msg.Receiver)
 	handshake := lookup.handshake
 	if handshake == nil {
-		return nil
+		return nil, fmt.Errorf("handshake received not found (receiver: %d)", msg.Receiver)
 	}
 
 	var (
@@ -542,14 +532,14 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		chainKey [blake2s.Size]byte
 	)
 
-	ok := func() bool {
+	err := func() error {
 		// lock handshake state
 
 		handshake.mutex.RLock()
 		defer handshake.mutex.RUnlock()
 
 		if handshake.state != handshakeInitiationCreated {
-			return false
+			return fmt.Errorf("handshake state is %d, expected: %d", handshake.state, handshakeInitiationCreated)
 		}
 
 		// lock private key for reading
@@ -564,14 +554,14 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 
 		ss, err := handshake.localEphemeral.sharedSecret(msg.Ephemeral)
 		if err != nil {
-			return false
+			return fmt.Errorf("failed to get shared secret from local ephemeral: %w", err)
 		}
 		mixKey(&chainKey, &chainKey, ss[:])
 		setZero(ss[:])
 
 		ss, err = device.staticIdentity.privateKey.sharedSecret(msg.Ephemeral)
 		if err != nil {
-			return false
+			return fmt.Errorf("failed to get shared secret from static identity: %w", err)
 		}
 		mixKey(&chainKey, &chainKey, ss[:])
 		setZero(ss[:])
@@ -594,14 +584,14 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		aead, _ := chacha20poly1305.New(key[:])
 		_, err = aead.Open(nil, ZeroNonce[:], msg.Empty[:], hash[:])
 		if err != nil {
-			return false
+			return fmt.Errorf("failed to open aead: %w", err)
 		}
 		mixHash(&hash, &hash, msg.Empty[:])
-		return true
+		return nil
 	}()
 
-	if !ok {
-		return nil
+	if err != nil {
+		return nil, err
 	}
 
 	// update handshake state
@@ -618,13 +608,15 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 	setZero(hash[:])
 	setZero(chainKey[:])
 
-	return lookup.peer
+	return lookup.peer, nil
 }
 
 /* Derives a new keypair from the current handshake state
  *
  */
 func (peer *Peer) BeginSymmetricSession() error {
+	peer.device.log.Verbosef("%s - begin symmetric session", peer)
+
 	device := peer.device
 	handshake := &peer.handshake
 	handshake.mutex.Lock()

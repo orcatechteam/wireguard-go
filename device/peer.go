@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/tai64n"
 )
 
 var errNoKnownEndpoint = errors.New("no known endpoint for peer")
@@ -129,6 +130,8 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// add
 	device.peers.keyMap[pk] = peer
 
+	device.log.Verbosef("created new peer %s", peer)
+
 	return peer, nil
 }
 
@@ -207,6 +210,8 @@ func (peer *Peer) Start() {
 		return
 	}
 
+	peer.device.log.Verbosef("%s: starting", peer)
+
 	device := peer.device
 	//device.log.Verbosef("%v - Starting", peer)
 
@@ -254,6 +259,13 @@ func (peer *Peer) ZeroAndFlushAll() {
 	handshake := &peer.handshake
 	handshake.mutex.Lock()
 	device.indexTable.Delete(handshake.localIndex)
+	peer.handshake.localIndex = 0
+	peer.handshake.remoteIndex = 0
+	peer.handshake.lastInitiationConsumption = time.Time{}
+	peer.handshake.lastSentHandshake = time.Time{}
+	peer.handshake.lastTimestamp = tai64n.Timestamp{}
+	peer.lastHandshakeNano.Swap(0)
+	setZero(peer.handshake.presharedKey[:])
 	handshake.Clear()
 	handshake.mutex.Unlock()
 
@@ -279,7 +291,7 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	keypairs.Unlock()
 }
 
-func (peer *Peer) Stop() {
+func (peer *Peer) Stop(stopKeepAlive bool) {
 	peer.state.Lock()
 	defer peer.state.Unlock()
 
@@ -287,9 +299,15 @@ func (peer *Peer) Stop() {
 		return
 	}
 
-	//peer.device.log.Verbosef("%v - Stopping", peer)
+	peer.device.log.Verbosef("%v - Stopping", peer)
+	defer peer.device.log.Verbosef("%v - Stopped", peer)
 
 	peer.timersStop()
+	if stopKeepAlive && peer.timers.persistentKeepalive != nil {
+		peer.device.log.Verbosef("%v - stopping keep alive", peer)
+		peer.timers.persistentKeepalive.DelSync()
+	}
+
 	// Signal that RoutineSequentialSender and RoutineSequentialReceiver should exit.
 	peer.queue.inbound.c <- nil
 	peer.queue.outbound.c <- nil
@@ -316,4 +334,22 @@ func (peer *Peer) markEndpointSrcForClearing() {
 		return
 	}
 	peer.endpoint.clearSrcOnTx = true
+}
+
+func (peer *Peer) stopInRoutine(stopKeepAlive bool) {
+	peer.device.peers.stopping.Add(1)
+	go peer.stopRoutine(stopKeepAlive)
+	// wait for stop to indicate that has starting shutting down, otherwise more processing will happen
+	peer.waitUntilStopping()
+}
+
+func (peer *Peer) stopRoutine(stopKeepAlive bool) {
+	peer.device.peers.stopping.Done()
+	peer.Stop(stopKeepAlive)
+}
+
+func (peer *Peer) waitUntilStopping() {
+	for peer.isRunning.Load() {
+		time.Sleep(100 * time.Millisecond)
+	}
 }

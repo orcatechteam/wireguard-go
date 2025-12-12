@@ -268,13 +268,12 @@ func (peer *ipcSetPeer) handlePostConfig() {
 		peer.device.log.Verbosef("%s - UAPI: Starting endpoint %s", peer.Peer, peer.endpoint.val)
 		peer.Start()
 		if peer.pkaOn {
-			if err := peer.SendKeepalive(); err != nil && errors.Is(err, net.ErrClosed) {
-				peer.Stop()
+			peer.initPersistentKeepAliveTimer()
+			if peer.handleErrorf("failed to send keep alive", peer.SendKeepalive()) {
+				return
 			}
 		}
-		if err := peer.SendStagedPackets(); err != nil && errors.Is(err, net.ErrClosed) {
-			peer.Stop()
-		}
+		peer.handleErrorf("failed to send staged packets", peer.SendStagedPackets())
 	}
 }
 
@@ -294,7 +293,7 @@ func (device *Device) handlePublicKeyLine(peer *ipcSetPeer, value string) error 
 	if peer.dummy {
 		peer.Peer = &Peer{}
 	} else {
-		peer.Peer = device.LookupPeer(publicKey)
+		peer.Peer, _ = device.LookupPeer(publicKey)
 	}
 
 	peer.created = peer.Peer == nil
@@ -355,7 +354,7 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 		peer.endpoint.val = endpoint
 
 	case "persistent_keepalive_interval":
-		device.log.Verbosef("%v - UAPI: Updating persistent keepalive interval", peer.Peer)
+		device.log.Verbosef("%v - UAPI: Updating persistent keepalive interval: %ss", peer.Peer, value)
 
 		secs, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {

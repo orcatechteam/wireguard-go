@@ -8,6 +8,7 @@ package device
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -78,6 +79,7 @@ func (elem *QueueOutboundElement) clearPointers() {
 
 // SendKeepalive Queues a keepalive if no packets are queued for peer
 func (peer *Peer) SendKeepalive() error {
+	peer.device.log.Verbosef("%v - sending keep alive", peer)
 	if len(peer.queue.staged) == 0 && peer.isRunning.Load() {
 		elem := peer.device.NewOutboundElement()
 		elemsContainer := peer.device.GetOutboundElementsContainer()
@@ -100,14 +102,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	}
 
 	peer.handshake.mutex.RLock()
-	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
+	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout && peer.handshake.state != handshakeZeroed {
 		peer.handshake.mutex.RUnlock()
 		return nil
 	}
 	peer.handshake.mutex.RUnlock()
 
 	peer.handshake.mutex.Lock()
-	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
+	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout && peer.handshake.state != handshakeZeroed {
 		peer.handshake.mutex.Unlock()
 		return nil
 	}
@@ -116,8 +118,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
-		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
-		return err
+		return fmt.Errorf("failed to create initiation message: %w", err)
 	}
 
 	packet := make([]byte, MessageInitiationSize)
@@ -130,14 +131,11 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	buffers := peer.getBuffers(packet)
 	err = peer.SendBuffers(buffers)
 	peer.putBuffers(buffers)
-	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
-		peer.device.log.Errorf("%v - Failed to send handshake initiation: %s", peer, err)
+	if err != nil {
+		return fmt.Errorf("failed to send handshake initiation: %w", err)
 	}
-	if err == nil {
-		peer.timersHandshakeInitiated()
-	}
-
-	return err
+	peer.timersHandshakeInitiated()
+	return nil
 }
 
 func (peer *Peer) SendHandshakeResponse() error {
@@ -147,9 +145,10 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 	response, err := peer.device.CreateMessageResponse(peer)
 	if err != nil {
-		peer.device.log.Errorf("%v - Failed to create response message: %v", peer, err)
-		return err
+		return fmt.Errorf("failed to create response message: %w", err)
 	}
+	peer.device.log.Verbosef("sending handshake response (sender: %d, received: %d)", response.Sender, response.Receiver)
+	defer peer.device.log.Verbosef("sent handshake response (sender: %d, received: %d)", response.Sender, response.Receiver)
 
 	packet := make([]byte, MessageResponseSize)
 	_ = response.marshal(packet)
@@ -157,8 +156,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 	err = peer.BeginSymmetricSession()
 	if err != nil {
-		peer.device.log.Errorf("%v - Failed to derive keypair: %v", peer, err)
-		return err
+		return fmt.Errorf("failed to derive keypair: %w", err)
 	}
 
 	peer.timersSessionDerived()
@@ -168,8 +166,8 @@ func (peer *Peer) SendHandshakeResponse() error {
 	buffers := peer.getBuffers(packet)
 	err = peer.SendBuffers(buffers)
 	peer.putBuffers(buffers)
-	if err != nil && !errors.Is(err, errNoKnownEndpoint) {
-		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
+	if err != nil {
+		return fmt.Errorf("failed to send buffers: %w", err)
 	}
 	return err
 }
@@ -179,7 +177,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	reply, err := device.cookieChecker.CreateReply(initiatingElem.packet, sender, initiatingElem.endpoint.DstToBytes())
 	if err != nil {
 		device.log.Errorf("Failed to create cookie reply: %v", err)
-		return err
+		return fmt.Errorf("failed to create cookie reply: %w", err)
 	}
 
 	packet := make([]byte, MessageCookieReplySize)
@@ -189,25 +187,27 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	buffers := device.getBuffers(packet)
 	err = device.net.bind.Send(buffers, initiatingElem.endpoint)
 	device.putBuffers(buffers)
-	return err
+	return fmt.Errorf("failed to send buffers: %w", err)
 }
 
-func (peer *Peer) keepKeyFreshSending() {
+func (peer *Peer) keepKeyFreshSending() error {
 	keypair := peer.keypairs.Current()
 	if keypair == nil {
-		return
+		return nil
 	}
 	nonce := keypair.sendNonce.Load()
 	if nonce > RekeyAfterMessages || (keypair.isInitiator && time.Since(keypair.created) > RekeyAfterTime) {
 		if err := peer.SendHandshakeInitiation(false); err != nil {
-			peer.device.log.Verbosef("Sent handshake initiation failed in send staged packets: %s", err)
+			return fmt.Errorf("failed to send handshake initiation: %w", err)
 		}
 	}
+	return nil
 }
 
 func (device *Device) AllowedIPs() *AllowedIPs {
 	return &device.allowedips
 }
+
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.state.stopping.Done()
@@ -290,9 +290,7 @@ func (device *Device) RoutineReadFromTUN() {
 		for peer, elemsForPeer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				peer.StagePackets(elemsForPeer)
-				if err := peer.SendStagedPackets(); err != nil && errors.Is(err, net.ErrClosed) {
-					peer.Stop()
-				}
+				peer.handleErrorf("failed to send staged packets", peer.SendStagedPackets())
 			} else {
 				for _, elem := range elemsForPeer.elems {
 					device.PutMessageBuffer(elem.buffer)
@@ -354,10 +352,7 @@ top:
 	keypair := peer.keypairs.Current()
 	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
 		if err := peer.SendHandshakeInitiation(false); err != nil {
-			peer.device.log.Verbosef("Sent handshake initiation failed in send staged packets: " + err.Error())
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
+			return fmt.Errorf("failed to send handshake initiation: %w", err)
 		}
 		return nil
 	}
@@ -544,16 +539,8 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		case errors.Is(err, errNoKnownEndpoint):
 		case errors.Is(err, net.ErrClosed):
 			// need to do in a go routine as stop waits for this routine to exit, add to device wait instead
-			peer.device.peers.stopping.Add(1)
-			go func() {
-				peer.device.peers.stopping.Done()
-				peer.Stop()
-			}()
+			peer.stopInRoutine(false)
 			device.log.Errorf("%v - peer disconnected: %v", peer, err)
-			// wait for stop to indicate that it is done, otherwise more processing will happen
-			for peer.isRunning.Load() {
-				time.Sleep(100 * time.Millisecond)
-			}
 			continue
 		default:
 			var errGSO conn.ErrUDPGSODisabled
@@ -565,6 +552,6 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			continue
 		}
 
-		peer.keepKeyFreshSending()
+		peer.handleErrorf("failed to keep key fresh sending", peer.keepKeyFreshSending())
 	}
 }

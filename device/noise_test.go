@@ -117,7 +117,10 @@ func TestNoiseHandshake(t *testing.T) {
 	msg2, err := dev2.CreateMessageResponse(peer1)
 	assertNil(t, err)
 
-	peer = dev1.ConsumeMessageResponse(msg2)
+	peer, err = dev1.ConsumeMessageResponse(msg2)
+	if err != nil {
+		t.Fatalf("handshake failed at response message: %s", err)
+	}
 	if peer == nil {
 		t.Fatal("handshake failed at response message")
 	}
