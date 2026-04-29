@@ -358,9 +358,9 @@ func (device *Device) RoutineHandshake(id int) {
 			peer, err := device.ConsumeMessageInitiation(&msg)
 			if err != nil {
 				if peer != nil {
-					peer.handleErrorf("received invalid initiation message", err)
+					peer.handleErrorf("received invalid initiation message: %s", err)
 				} else {
-					device.log.Errorf("Routine: handshake: %s: received invalid initiation message: %w", elem.endpoint, err)
+					device.log.Errorf("Routine: handshake: %s: received invalid initiation message: %s", elem.endpoint, err)
 				}
 				goto skip
 			}
@@ -380,8 +380,8 @@ func (device *Device) RoutineHandshake(id int) {
 			}
 
 			peer.rxBytes.Add(uint64(len(elem.packet)))
-			if !peer.handleErrorf("failed to send handshake response", peer.SendHandshakeResponse()) && sendKeepAlive {
-				peer.handleErrorf("failed to send keep alive: %w", peer.SendKeepalive())
+			if !peer.handleErrorf("failed to send handshake response: %s", peer.SendHandshakeResponse()) && sendKeepAlive {
+				peer.handleErrorf("failed to send keep alive: %s", peer.SendKeepalive())
 			}
 
 		case MessageResponseType:
@@ -495,7 +495,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
 
 				if device.allowedips.Lookup(src) != peer {
-					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
+					device.log.Verbosef("IPv4 packet with disallowed source address %X from %v", src, peer)
 					continue
 				}
 
