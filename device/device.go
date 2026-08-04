@@ -7,6 +7,7 @@ package device
 
 import (
 	"fmt"
+	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -213,7 +214,17 @@ func (device *Device) upLocked() error {
 		device.log.Verbosef("%s: Starting after bringing device up", peer.endpoint.val)
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
-			peer.handleErrorf("failed to send keep alive", peer.SendKeepalive())
+			// don't come up until keep alive is complete
+			err := peer.SendKeepalive()
+			for err != nil {
+				peer.handleErrorf("failed to send keep alive when bringing up", err)
+				select {
+				case <-device.closed:
+					return net.ErrClosed
+				case <-time.After(time.Duration(peer.persistentKeepaliveInterval.Load()) * time.Second):
+					err = peer.SendKeepalive()
+				}
+			}
 		}
 		peer.handleErrorf("failed to send staged packets", peer.SendStagedPackets())
 	}
@@ -455,7 +466,7 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			peer.handleErrorf("failed to send keepalive", peer.SendKeepalive())
+			peer.handleErrorf("failed to send keep alive to one of the peers", peer.SendKeepalive())
 		}
 	}
 	device.peers.RUnlock()

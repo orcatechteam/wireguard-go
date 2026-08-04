@@ -381,7 +381,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 			if !peer.handleErrorf("failed to send handshake response: %s", peer.SendHandshakeResponse()) && sendKeepAlive {
-				peer.handleErrorf("failed to send keep alive: %s", peer.SendKeepalive())
+				peer.handleErrorf("failed to send keep alive in message initiation: %s", peer.SendKeepalive())
 			}
 
 		case MessageResponseType:
@@ -427,7 +427,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
-			peer.handleErrorf("failed to send keep alive", peer.SendKeepalive())
+			peer.handleErrorf("failed to send keep alive after response", peer.SendKeepalive())
 		}
 	skip:
 		device.PutMessageBuffer(elem.buffer)

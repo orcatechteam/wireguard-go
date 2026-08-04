@@ -269,7 +269,7 @@ func (peer *ipcSetPeer) handlePostConfig() {
 		peer.Start()
 		if peer.pkaOn {
 			peer.initPersistentKeepAliveTimer()
-			if peer.handleErrorf("failed to send keep alive", peer.SendKeepalive()) {
+			if peer.handleErrorf("failed to send keep alive after post config", peer.SendKeepalive()) {
 				return
 			}
 		}

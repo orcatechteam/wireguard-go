@@ -116,7 +116,7 @@ func expiredRetransmitHandshake(peer *Peer) {
 }
 
 func expiredSendKeepalive(peer *Peer) {
-	if !peer.handleErrorf("failed to send keep alive", peer.SendKeepalive()) {
+	if !peer.handleErrorf("failed to send keep alive after expiration", peer.SendKeepalive()) {
 		if peer.timers.needAnotherKeepalive.Load() {
 			peer.timers.needAnotherKeepalive.Store(false)
 			if peer.timersActive() {
