@@ -95,7 +95,8 @@ func expiredRetransmitHandshake(peer *Peer) {
 
 	peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
 
-	if peer.timersActive() {
+	// only stop keep alive if not persistent
+	if peer.timersActive() && peer.timers.persistentKeepalive == nil {
 		peer.timers.sendKeepalive.Del()
 	}
 
@@ -112,7 +113,7 @@ func expiredRetransmitHandshake(peer *Peer) {
 	}
 
 	// need to do in a go routine as stop waits for this routine to exit, add to device wait instead
-	peer.stopInRoutine(false)
+	peer.stopInRoutine(peer.persistentKeepaliveInterval.Load() == 0)
 }
 
 func expiredSendKeepalive(peer *Peer) {
@@ -216,7 +217,7 @@ func (peer *Peer) timersInit() {
 }
 
 func (peer *Peer) initPersistentKeepAliveTimer() {
-	peer.device.log.Verbosef("%v - starting keep alive", peer)
+	peer.device.log.Verbosef("%v - starting persistent keep alive", peer)
 	peer.timers.persistentKeepalive = peer.NewTimer(expiredPersistentKeepalive)
 }
 

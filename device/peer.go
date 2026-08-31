@@ -304,7 +304,7 @@ func (peer *Peer) Stop(stopKeepAlive bool) {
 
 	peer.timersStop()
 	if stopKeepAlive && peer.timers.persistentKeepalive != nil {
-		peer.device.log.Verbosef("%v - stopping keep alive", peer)
+		peer.device.log.Verbosef("%v - stopping persistent keep alive", peer)
 		peer.timers.persistentKeepalive.DelSync()
 	}
 

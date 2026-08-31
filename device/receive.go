@@ -558,7 +558,7 @@ func (peer *Peer) handleErrorf(fmt string, err error) bool {
 	}
 	peer.device.log.Errorf("%s: "+fmt+": %s", peer, err)
 	if errors.Is(err, net.ErrClosed) { //|| errors.Is(err, errNoKnownEndpoint) {
-		peer.stopInRoutine(false)
+		peer.stopInRoutine(peer.persistentKeepaliveInterval.Load() == 0)
 		return true
 	}
 	return false

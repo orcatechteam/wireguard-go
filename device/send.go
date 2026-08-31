@@ -539,7 +539,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		case errors.Is(err, errNoKnownEndpoint):
 		case errors.Is(err, net.ErrClosed):
 			// need to do in a go routine as stop waits for this routine to exit, add to device wait instead
-			peer.stopInRoutine(false)
+			peer.stopInRoutine(peer.persistentKeepaliveInterval.Load() == 0)
 			device.log.Errorf("%v - peer disconnected: %v", peer, err)
 			continue
 		default:
